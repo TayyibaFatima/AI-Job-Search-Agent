@@ -1,6 +1,8 @@
-
+from backend.tools.job_ranking import (
+    analyze_skill_gaps,
+    rank_jobs,
+)
 import json
-
 from backend.tools.job_search import search_jobs
 from backend.tools.cv_parser import extract_cv_text
 from backend.tools.cv_analyzer import analyze_cv
@@ -45,7 +47,7 @@ print(
     f"{len(eligible_jobs)}"
 )
 
-
+match_reports = []
 for index, job in enumerate(eligible_jobs, start=1):
     print("\n" + "=" * 60)
     print(f"JOB {index}: {job.get('title')}")
@@ -58,7 +60,7 @@ for index, job in enumerate(eligible_jobs, start=1):
             candidate,
             requirements
         )
-
+        match_reports.append(result)
         print("\nJOB REQUIREMENTS")
         print(requirements.model_dump_json(indent=2))
 
@@ -74,3 +76,36 @@ for index, job in enumerate(eligible_jobs, start=1):
 
     except Exception as error:
         print(f"Could not analyze this job: {error}")
+    print("\n" + "=" * 60)
+print("STAGE 4: RANKED JOBS")
+print("=" * 60)
+
+ranked_jobs = rank_jobs(match_reports)
+
+for job in ranked_jobs:
+    print(f"\nRank: #{job['rank']}")
+    print(f"Job: {job['job_title']}")
+    print(f"Company: {job['company']}")
+    print(f"Skill match: {job['skill_match_score']}")
+    print(f"Match tier: {job['match_tier']}")
+    print(f"Score status: {job['score_status']}")
+
+    if job.get("warning"):
+        print(f"Warning: {job['warning']}")
+
+
+print("\n" + "=" * 60)
+print("STAGE 4: SKILL-GAP ANALYSIS")
+print("=" * 60)
+
+skill_gaps = analyze_skill_gaps(match_reports)
+
+if not skill_gaps:
+    print("No missing required skills were identified.")
+else:
+    for gap in skill_gaps:
+        print(f"\nSkill: {gap['skill']}")
+        print(f"Missing across {gap['frequency']} job(s):")
+
+        for job_label in gap["jobs"]:
+            print(f"  - {job_label}")
