@@ -4,3 +4,9 @@ __pycache__/
 *.pyc
 stage10_current_thread.txt
 stage10_history_summary.json
+# Generated test outputs
+stage*_application_materials.json
+stage*_workflow_output.json
+stage*_approved_application.json
+stage*_history_summary.json
+stage10_current_thread.txt
