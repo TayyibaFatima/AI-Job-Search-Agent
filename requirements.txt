@@ -5,3 +5,4 @@ python-dotenv
 pydantic
 PyMuPDF
 langgraph
+pip install langgraph-checkpoint-postgres "psycopg[binary]"
