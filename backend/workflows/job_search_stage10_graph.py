@@ -5,6 +5,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
 from backend.database import save_search_history
+from backend.tools.job_filters import filter_jobs
 from backend.workflows.job_search_graph import (
     JobSearchState,
     load_candidate_node,
@@ -17,6 +18,27 @@ from backend.workflows.job_search_graph import (
 class Stage10State(JobSearchState, total=False):
     thread_id: str
     human_decision: str
+    preferences: dict
+
+
+def filter_jobs_node(state: Stage10State) -> dict:
+    jobs = state.get("jobs", [])
+    preferences = state.get("preferences", {})
+
+    filtered_jobs = filter_jobs(
+        jobs=jobs,
+        location=preferences.get("location"),
+        remote_only=preferences.get("remote_only", False),
+        min_salary=preferences.get("min_salary"),
+        excluded_keywords=preferences.get("excluded_keywords", []),
+    )
+
+    print(
+        f"Job filtering completed: {len(filtered_jobs)} of "
+        f"{len(jobs)} jobs matched your preferences."
+    )
+
+    return {"jobs": filtered_jobs}
 
 
 def save_pending_history_node(state: Stage10State) -> dict:
@@ -43,16 +65,21 @@ def save_pending_history_node(state: Stage10State) -> dict:
 def review_job_node(state: Stage10State) -> dict:
     top_job = state["ranked_jobs"][0]
 
-    decision = interrupt({
-        "message": "Review this job before generating application materials.",
-        "job_title": top_job.get("job_title"),
-        "company": top_job.get("company"),
-        "skill_match_score": top_job.get("skill_match_score"),
-        "match_tier": top_job.get("match_tier"),
-        "score_status": top_job.get("score_status"),
-        "warning": top_job.get("warning"),
-        "options": ["approve", "reject"],
-    })
+    decision = interrupt(
+        {
+            "message": "Review this job before generating application materials.",
+            "job_title": top_job.get("job_title"),
+            "company": top_job.get("company"),
+            "skill_match_score": top_job.get("skill_match_score"),
+            "match_tier": top_job.get("match_tier"),
+            "score_status": top_job.get("score_status"),
+            "missing_required_skills": top_job.get(
+                "missing_required_skills", []
+            ),
+            "warning": top_job.get("warning"),
+            "options": ["approve", "reject"],
+        }
+    )
 
     if isinstance(decision, str):
         decision = decision.strip().lower()
@@ -64,7 +91,7 @@ def save_review_decision_node(state: Stage10State) -> dict:
     decision = state.get("human_decision")
 
     if decision not in ("approve", "reject"):
-        raise ValueError("Invalid human review decision.")
+        raise ValueError("Decision must be 'approve' or 'reject'.")
 
     ranked_jobs = state.get("ranked_jobs", [])
 
@@ -113,6 +140,7 @@ def build_stage10_graph(checkpointer):
 
     workflow.add_node("load_candidate", load_candidate_node)
     workflow.add_node("search_jobs", search_jobs_node)
+    workflow.add_node("filter_jobs", filter_jobs_node)
     workflow.add_node("analyze_and_rank", analyze_and_rank_node)
     workflow.add_node("save_pending_history", save_pending_history_node)
     workflow.add_node("review_job", review_job_node)
@@ -122,15 +150,14 @@ def build_stage10_graph(checkpointer):
 
     workflow.add_edge(START, "load_candidate")
     workflow.add_edge("load_candidate", "search_jobs")
-    workflow.add_edge("search_jobs", "analyze_and_rank")
+    workflow.add_edge("search_jobs", "filter_jobs")
+    workflow.add_edge("filter_jobs", "analyze_and_rank")
 
     workflow.add_conditional_edges(
         "analyze_and_rank",
-        lambda state: (
-            "save_pending_history"
-            if state.get("ranked_jobs")
-            else "end"
-        ),
+        lambda state: "save_pending_history"
+        if state.get("ranked_jobs")
+        else "end",
         {
             "save_pending_history": "save_pending_history",
             "end": END,
