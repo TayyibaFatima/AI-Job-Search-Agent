@@ -2,3 +2,5 @@ venv/
 .env
 __pycache__/
 *.pyc
+stage10_current_thread.txt
+stage10_history_summary.json
