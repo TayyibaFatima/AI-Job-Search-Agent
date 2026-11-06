@@ -1,85 +1,85 @@
+"""
+Candidate <-> job skill matching.
+
+Scoring model
+-------------
+* Every required skill is classed as a DIRECT match (the CV names it),
+  a RELATED match (the CV shows closely related tools, worth half credit)
+  or MISSING.
+* ``skill_match_score``  = (direct + 0.5 * related) / required * 100
+* ``confidence`` reflects how much evidence the score rests on. A score
+  built from 1 or 2 skills is flagged "low" and is never presented as a
+  confident result; with zero skills the score is simply unavailable.
+* ``ranking_score`` shrinks small samples toward 50% so that "1 of 1" can
+  not outrank "8 of 10". It is used only for ordering.
+"""
+
+from __future__ import annotations
+
 import re
 
 from backend.models.candidate import CandidateProfile
 from backend.models.job import JobRequirements
+from backend.tools.skill_taxonomy import (
+    SKILLS,
+    contains_phrase,
+    find_skills,
+    normalize_skill,
+)
 
+MIN_SKILLS_FOR_CONFIDENT_SCORE = 3
+HIGH_CONFIDENCE_MIN_SKILLS = 5
+RELATED_CREDIT = 0.5
+RANKING_PRIOR_WEIGHT = 3  # pseudo-skills at 50% used to shrink small samples
 
-SKILL_ALIASES = {
-    "ml": "machine learning",
-    "machine-learning": "machine learning",
-    "llm": "large language models",
-    "llms": "large language models",
-    "large language model": "large language models",
-    "postgres": "postgresql",
-    "sklearn": "scikit-learn",
-    "scikit learn": "scikit-learn",
-    "rest api": "rest apis",
-    "restful api": "rest apis",
-    "artificial intelligence": "ai",
-}
-
-
-RELATED_EVIDENCE = {
+# required skill -> skills that give related (partial) evidence for it
+RELATED_EVIDENCE: dict[str, list[str]] = {
     "machine learning": [
-        "scikit-learn",
-        "neural network",
-        "classification",
-        "classifier",
+        "scikit-learn", "pytorch", "tensorflow", "keras", "xgboost",
+        "neural networks", "deep learning", "natural language processing",
+        "computer vision",
     ],
+    "ai": [
+        "machine learning", "deep learning", "generative ai",
+        "large language models", "natural language processing",
+        "computer vision", "neural networks",
+    ],
+    "deep learning": ["pytorch", "tensorflow", "keras", "neural networks"],
     "generative ai": [
-        "large language model",
-        "llm api",
-        "llm-powered",
+        "large language models", "rag", "prompt engineering", "langchain",
     ],
     "large language models": [
-        "generative ai",
-        "llm api",
+        "generative ai", "openai api", "langchain", "rag", "hugging face",
     ],
+    "data analysis": ["pandas", "data science", "excel", "power bi", "tableau"],
+    "sql": ["postgresql", "mysql", "sqlite"],
+    "nosql": ["mongodb", "redis"],
+    "rest apis": ["fastapi", "flask", "django", "api integration"],
+    "api integration": ["rest apis"],
+    "automation": ["n8n", "zapier", "selenium"],
+    "docker": ["kubernetes"],
+    "git": ["github actions"],
 }
-
-
-def normalize_skill(skill: str) -> str:
-    normalized = skill.lower().strip()
-    normalized = normalized.replace("_", " ")
-    normalized = normalized.replace(" (llms)", "")
-    normalized = re.sub(r"[^a-z0-9+#.\s-]", " ", normalized)
-    normalized = re.sub(r"\s+", " ", normalized).strip()
-
-    return SKILL_ALIASES.get(normalized, normalized)
 
 
 def expand_skill(skill: str) -> list[str]:
-    """Split combined skill labels into separate requirements."""
+    """Split combined labels such as 'AI & Machine Learning' into parts."""
+    text = (skill or "").strip()
 
-    normalized = skill.strip()
-
-    if re.search(r"\s*&\s*|\s*/\s*", normalized):
-        parts = re.split(r"\s*&\s*|\s*/\s*", normalized)
-
-    elif re.fullmatch(
-        r"AI\s+and\s+Machine Learning",
-        normalized,
-        re.IGNORECASE,
-    ):
-        parts = re.split(
-            r"\s+and\s+",
-            normalized,
-            flags=re.IGNORECASE,
-        )
-
+    if normalize_skill(text) in SKILLS:
+        # Real skills such as "ci/cd" must stay in one piece.
+        parts = [text]
+    elif re.search(r"\s*&\s*|\s*/\s*", text):
+        parts = re.split(r"\s*&\s*|\s*/\s*", text)
+    elif re.fullmatch(r"AI\s+and\s+Machine Learning", text, re.IGNORECASE):
+        parts = re.split(r"\s+and\s+", text, flags=re.IGNORECASE)
     else:
-        parts = [normalized]
+        parts = [text]
 
-    return [
-        part.strip()
-        for part in parts
-        if part.strip()
-    ]
+    return [p.strip() for p in parts if p.strip()]
 
 
-def collect_candidate_evidence(
-    candidate: CandidateProfile,
-) -> list[str]:
+def collect_candidate_evidence(candidate: CandidateProfile) -> list[str]:
     evidence = list(candidate.skills)
 
     for project in candidate.projects:
@@ -97,52 +97,36 @@ def collect_candidate_evidence(
         evidence.append(education.institution)
         evidence.append(education.field)
 
-    return [
-        item.strip()
-        for item in evidence
-        if item and item.strip()
-    ]
+    return [item.strip() for item in evidence if item and item.strip()]
 
 
-def contains_phrase(text: str, phrase: str) -> bool:
-    pattern = (
-        r"(?<![a-z0-9+#])"
-        + re.escape(phrase.lower())
-        + r"(?![a-z0-9+#])"
-    )
+def build_candidate_skill_set(evidence: list[str]) -> tuple[set[str], str]:
+    """Canonical skills the CV demonstrates, plus the joined evidence text."""
+    blob = "\n".join(evidence)
 
-    return bool(re.search(pattern, text.lower()))
+    skills = {normalize_skill(item) for item in evidence}
+    skills.update(find_skills(blob))
+    skills.discard("")
+
+    return skills, blob
 
 
-def has_skill_evidence(
+def classify_skill(
     required_skill: str,
-    evidence: list[str],
-) -> bool:
+    candidate_skills: set[str],
+    evidence_blob: str,
+) -> str | None:
+    """Return 'direct', 'related' or None for one required skill."""
     target = normalize_skill(required_skill)
 
-    normalized_evidence = [
-        normalize_skill(item)
-        for item in evidence
-    ]
+    if target in candidate_skills or contains_phrase(evidence_blob, target):
+        return "direct"
 
-    # Direct skill match.
-    if target in normalized_evidence:
-        return True
+    for related in RELATED_EVIDENCE.get(target, []):
+        if related in candidate_skills:
+            return "related"
 
-    # Direct phrase match in CV projects, experience, and other evidence.
-    for item in evidence:
-        if contains_phrase(item, target):
-            return True
-
-    # Related evidence can support a broader skill match.
-    related_terms = RELATED_EVIDENCE.get(target, [])
-
-    for term in related_terms:
-        for item in evidence:
-            if contains_phrase(item, term):
-                return True
-
-    return False
+    return None
 
 
 def is_senior_role(job_title: str) -> bool:
@@ -154,8 +138,25 @@ def is_senior_role(job_title: str) -> bool:
         r"technical manager"
         r")\b"
     )
-
     return bool(re.search(pattern, job_title, re.IGNORECASE))
+
+
+def _unique(skills) -> list[str]:
+    return list(dict.fromkeys(skills))
+
+
+def compute_confidence(total: int, quality: str, source: str) -> str:
+    if total < MIN_SKILLS_FOR_CONFIDENT_SCORE:
+        return "low"
+
+    if (
+        total >= HIGH_CONFIDENCE_MIN_SKILLS
+        and quality == "good"
+        and source == "full_page"
+    ):
+        return "high"
+
+    return "medium"
 
 
 def match_candidate_to_job(
@@ -163,81 +164,103 @@ def match_candidate_to_job(
     job: JobRequirements,
 ) -> dict:
     evidence = collect_candidate_evidence(candidate)
+    candidate_skills, blob = build_candidate_skill_set(evidence)
 
-    required = list(dict.fromkeys(
-        skill
+    required = _unique(
+        normalize_skill(skill)
         for item in job.required_skills
         for skill in expand_skill(item)
-    ))
-
-    preferred = list(dict.fromkeys(
+    )
+    preferred = [
         skill
-        for item in job.preferred_skills
-        for skill in expand_skill(item)
-    ))
-
-    matched_required = [
-        skill
-        for skill in required
-        if has_skill_evidence(skill, evidence)
+        for skill in _unique(
+            normalize_skill(skill)
+            for item in job.preferred_skills
+            for skill in expand_skill(item)
+        )
+        if skill not in required
     ]
 
-    missing_required = [
-        skill
-        for skill in required
-        if not has_skill_evidence(skill, evidence)
-    ]
+    direct, related, missing = [], [], []
+    for skill in required:
+        kind = classify_skill(skill, candidate_skills, blob)
+        (direct if kind == "direct" else related if kind == "related"
+         else missing).append(skill)
 
     matched_preferred = [
-        skill
-        for skill in preferred
-        if has_skill_evidence(skill, evidence)
+        skill for skill in preferred
+        if classify_skill(skill, candidate_skills, blob) == "direct"
     ]
 
-    match_score = (
-        round(len(matched_required) / len(required) * 100, 2)
-        if required
+    total = len(required)
+    points = len(direct) + RELATED_CREDIT * len(related)
+
+    score = round(points / total * 100, 1) if total else None
+    ranking_score = (
+        round(
+            (points + RANKING_PRIOR_WEIGHT * 0.5)
+            / (total + RANKING_PRIOR_WEIGHT) * 100,
+            1,
+        )
+        if total
         else None
     )
 
-    if match_score is None:
-        score_status = "unavailable"
-    elif (
-        job.description_quality != "good"
-        or job.missing_information
-    ):
-        score_status = "preliminary"
+    confidence = compute_confidence(
+        total, job.description_quality, job.description_source
+    )
+
+    if total == 0:
+        status = "insufficient_data"
+    elif confidence == "low":
+        status = "low_confidence"
     else:
-        score_status = "based_on_available_requirements"
+        status = "scored"
+
+    if total == 0:
+        interpretation = (
+            "No technical skills could be identified in this listing, so a "
+            "skill match score is unavailable."
+        )
+    else:
+        parts = [f"{len(direct)} of {total} listed skills found on your CV"]
+        if related:
+            parts.append(f"{len(related)} partly covered by related experience")
+        interpretation = (
+            "; ".join(parts) + ". This measures skill overlap only, "
+            "not overall suitability."
+        )
+
+    warnings = []
+    if job.description_source != "full_page":
+        warnings.append(
+            "Based on a short preview of the listing. Open the listing to "
+            "check for requirements not shown here."
+        )
+    if 0 < total < MIN_SKILLS_FOR_CONFIDENT_SCORE:
+        warnings.append(
+            f"Only {total} skill{'s' if total != 1 else ''} identified, so "
+            "this percentage is not reliable."
+        )
 
     return {
         "job_title": job.job_title,
         "company": job.company,
-        "skill_match_score": match_score,
-        "score_status": score_status,
+        "skill_match_score": score,
+        "ranking_score": ranking_score,
+        "score_status": status,
+        "confidence": confidence,
         "description_quality": job.description_quality,
-        "matched_required_skills": matched_required,
-        "missing_required_skills": missing_required,
+        "description_source": job.description_source,
+        "word_count": job.word_count,
+        "matched_required_skills": direct,
+        "partial_required_skills": related,
+        "missing_required_skills": missing,
         "matched_preferred_skills": matched_preferred,
-        "total_required_skills": len(required),
-        "total_matched_required_skills": len(matched_required),
+        "total_required_skills": total,
+        "total_matched_required_skills": len(direct),
+        "experience_level": job.experience_level,
         "missing_information": job.missing_information,
-        "interpretation": (
-            f"{len(matched_required)} of {len(required)} "
-            "extracted required skills matched. "
-            "This score does not measure overall suitability."
-            if required
-            else "No required skills could be extracted, so "
-                 "a skill match score is unavailable."
-        ),
-        "warning": (
-            "Job description is incomplete. Verify the full "
-            "listing before relying on this result."
-            if (
-                job.description_quality != "good"
-                or job.missing_information
-            )
-            else None
-        ),
+        "interpretation": interpretation,
+        "warning": " ".join(warnings) or None,
     }
-

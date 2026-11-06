@@ -5,6 +5,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
 from backend.database import save_search_history
+from backend.tools.countries import location_label
 from backend.tools.job_filters import filter_jobs
 from backend.workflows.job_search_graph import (
     JobSearchState,
@@ -51,7 +52,7 @@ def save_pending_history_node(state: Stage10State) -> dict:
         candidate=state["candidate"],
         thread_id=state["thread_id"],
         keyword=state.get("keyword", "AI machine learning"),
-        location=state.get("location", "London"),
+        location=location_label(state.get("location"), state.get("country")),
         ranked_jobs=ranked_jobs,
         selected_job=ranked_jobs[0],
         application_materials=None,
@@ -73,6 +74,7 @@ def review_job_node(state: Stage10State) -> dict:
             "skill_match_score": top_job.get("skill_match_score"),
             "match_tier": top_job.get("match_tier"),
             "score_status": top_job.get("score_status"),
+            "confidence": top_job.get("confidence"),
             "missing_required_skills": top_job.get(
                 "missing_required_skills", []
             ),
@@ -99,7 +101,7 @@ def save_review_decision_node(state: Stage10State) -> dict:
         candidate=state["candidate"],
         thread_id=state["thread_id"],
         keyword=state.get("keyword", "AI machine learning"),
-        location=state.get("location", "London"),
+        location=location_label(state.get("location"), state.get("country")),
         ranked_jobs=ranked_jobs,
         selected_job=ranked_jobs[0] if ranked_jobs else None,
         application_materials=None,
@@ -124,7 +126,7 @@ def save_final_materials_node(state: Stage10State) -> dict:
         candidate=state["candidate"],
         thread_id=state["thread_id"],
         keyword=state.get("keyword", "AI machine learning"),
-        location=state.get("location", "London"),
+        location=location_label(state.get("location"), state.get("country")),
         ranked_jobs=ranked_jobs,
         selected_job=ranked_jobs[0] if ranked_jobs else None,
         application_materials=state.get("application_materials"),
@@ -139,7 +141,18 @@ def build_stage10_graph(checkpointer):
     workflow = StateGraph(Stage10State)
 
     workflow.add_node("load_candidate", load_candidate_node)
-    workflow.add_node("search_jobs", search_jobs_node)
+
+    def search_jobs_with_preferences(state: Stage10State) -> dict:
+        preferences = state.get("preferences", {})
+        keyword = state.get("keyword", "AI machine learning")
+
+        if preferences.get("remote_only", False):
+            if "remote" not in keyword.casefold():
+                state = {**state, "keyword": f"{keyword} remote"}
+
+        return search_jobs_node(state)
+
+    workflow.add_node("search_jobs", search_jobs_with_preferences)
     workflow.add_node("filter_jobs", filter_jobs_node)
     workflow.add_node("analyze_and_rank", analyze_and_rank_node)
     workflow.add_node("save_pending_history", save_pending_history_node)

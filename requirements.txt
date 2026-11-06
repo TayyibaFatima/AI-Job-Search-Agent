@@ -1,8 +1,12 @@
-
 groq
 requests
 python-dotenv
 pydantic
 PyMuPDF
 langgraph
-pip install langgraph-checkpoint-postgres "psycopg[binary]"
+langgraph-checkpoint-postgres
+psycopg[binary]
+fastapi
+uvicorn[standard]
+python-multipart
+pytest

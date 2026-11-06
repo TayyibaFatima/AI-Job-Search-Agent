@@ -1,14 +1,9 @@
-import fitz
+try:
+    import pymupdf
+except ImportError:  # older PyMuPDF releases
+    import fitz as pymupdf
 
 
 def extract_cv_text(pdf_path):
-    document = fitz.open(pdf_path)
-
-    text = ""
-
-    for page in document:
-        text += page.get_text()
-
-    document.close()
-
-    return text
+    with pymupdf.open(pdf_path) as document:
+        return "".join(page.get_text() for page in document)

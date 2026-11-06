@@ -64,6 +64,30 @@ def create_cover_letter(
         f"Sincerely,\n{candidate.name}"
     )
 
+def create_skill_gap_guidance(match_report: dict) -> list[str]:
+    """Generate skill-gap guidance from the actual job-match report."""
+    missing_skills = match_report.get("missing_required_skills") or []
+
+    if missing_skills:
+        return [
+            f"Develop or demonstrate {skill} if it is relevant to your "
+            "career goals. Add it to your CV only after gaining practical "
+            "experience or completing relevant training."
+            for skill in missing_skills
+        ]
+
+    if match_report.get("score_status") == "unavailable":
+        return [
+            "The available job-match data is insufficient to identify "
+            "specific skill gaps. Review the job description and compare "
+            "its required skills with your verified skills."
+        ]
+
+    return [
+        "No missing required skills were identified in the current match "
+        "report. Review the full job description for additional technical "
+        "requirements and preferred skills."
+    ]
 
 def generate_application_materials(
     candidate: CandidateProfile,
@@ -212,5 +236,8 @@ RULES:
             for item in result[field]
             if isinstance(item, str) and item.strip()
         ]
-
+    if not result["skill_gap_guidance"]:
+        result["skill_gap_guidance"] = create_skill_gap_guidance(
+            match_report
+        )
     return ApplicationMaterials.model_validate(result)

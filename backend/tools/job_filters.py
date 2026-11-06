@@ -1,4 +1,5 @@
 
+import re
 from typing import Any
 
 
@@ -25,20 +26,24 @@ def filter_jobs(
         job_location = str(job.get("location") or "")
         description = str(job.get("description") or "")
 
-        searchable_text = (
-            f"{title} {company} {job_location} {description}"
-        ).casefold()
+        # Exclusions apply to the job TITLE only. Matching the whole
+        # description wrongly dropped jobs whose text merely contained
+        # words such as "lead" ("lead to", "team lead") or "senior".
+        title_text = title.casefold()
 
-        # Exclude jobs containing unwanted keywords.
-        if any(keyword in searchable_text for keyword in excluded):
+        if any(
+            re.search(rf"\b{re.escape(keyword)}\b", title_text)
+            for keyword in excluded
+        ):
             continue
 
-        # Keep jobs whose listed location matches the requested location.
+        # Treat Remote and Anywhere as work preferences, not city names.
         if location:
             requested_location = location.strip().casefold()
 
-            if requested_location not in job_location.casefold():
-                continue
+            if requested_location not in {"remote", "anywhere"}:
+                if requested_location not in job_location.casefold():
+                    continue
 
         # Keep only listings that explicitly indicate remote work.
         if remote_only:
