@@ -237,6 +237,11 @@ def search_jooble(
         response = requests.post(
             f"https://jooble.org/api/{api_key}",
             json={"keywords": keyword, "location": place, "page": "1"},
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": "Mozilla/5.0 (compatible; JobSearchAgent/1.0)",
+            },
             timeout=REQUEST_TIMEOUT,
         )
     except requests.RequestException as error:
