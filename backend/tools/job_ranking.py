@@ -1,3 +1,4 @@
+from backend.models.job import FULL_TEXT_SOURCES
 from backend.tools.skill_taxonomy import normalize_skill
 
 
@@ -72,6 +73,7 @@ def rank_jobs(match_reports: list[dict]) -> list[dict]:
 
     The adjusted ``ranking_score`` shrinks small samples toward 50%, so a
     listing with one extracted skill cannot outrank a well-evidenced one.
+    Jobs scored from the full listing come before preview-only jobs.
     Jobs without any score appear last. Ties favour higher confidence and
     then listings with more extracted requirements.
     """
@@ -89,6 +91,8 @@ def rank_jobs(match_reports: list[dict]) -> list[dict]:
     def sort_key(item):
         score = item.get("ranking_score")
         return (
+            # Scores built from the full listing outrank preview-only ones.
+            item.get("description_source") in FULL_TEXT_SOURCES,
             score is not None,
             score if score is not None else -1,
             CONFIDENCE_ORDER.get(item.get("confidence"), 0),

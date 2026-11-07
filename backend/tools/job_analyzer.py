@@ -23,7 +23,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from backend.models.job import JobRequirements
+from backend.models.job import FULL_TEXT_SOURCES, JobRequirements
 from backend.tools.skill_taxonomy import (
     SKILLS,
     clean_label,
@@ -369,7 +369,7 @@ def analyze_job(job: dict) -> JobRequirements:
         quality = "limited"
 
     missing: list[str] = []
-    if source != "full_page":
+    if source not in FULL_TEXT_SOURCES:
         missing.append(
             "Only a short preview of the listing was available, "
             "so some requirements may be missing."

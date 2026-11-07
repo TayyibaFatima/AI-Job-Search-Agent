@@ -19,7 +19,7 @@ from __future__ import annotations
 import re
 
 from backend.models.candidate import CandidateProfile
-from backend.models.job import JobRequirements
+from backend.models.job import FULL_TEXT_SOURCES, JobRequirements
 from backend.tools.skill_taxonomy import (
     SKILLS,
     contains_phrase,
@@ -152,7 +152,7 @@ def compute_confidence(total: int, quality: str, source: str) -> str:
     if (
         total >= HIGH_CONFIDENCE_MIN_SKILLS
         and quality == "good"
-        and source == "full_page"
+        and source in FULL_TEXT_SOURCES
     ):
         return "high"
 
@@ -232,7 +232,7 @@ def match_candidate_to_job(
         )
 
     warnings = []
-    if job.description_source != "full_page":
+    if job.description_source not in FULL_TEXT_SOURCES:
         warnings.append(
             "Based on a short preview of the listing. Open the listing to "
             "check for requirements not shown here."

@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-job-search-agent"
+version = "0.1.0"
+requires-python = "==3.13.*"
+dependencies = [
+    "fastapi[standard]",
+    "groq",
+    "requests",
+    "python-dotenv",
+    "pydantic",
+    "PyMuPDF",
+    "langgraph",
+    "langgraph-checkpoint-postgres",
+    "psycopg[binary]",
+    "python-multipart",
+]
+
+[tool.setuptools]
+packages = []
+
+[tool.fastapi]
+entrypoint = "backend.api:app"

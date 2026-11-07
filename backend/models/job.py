@@ -1,6 +1,10 @@
 from pydantic import BaseModel, Field
 
 
+# Description sources that contain the complete listing text.
+FULL_TEXT_SOURCES = ("full_page", "pasted")
+
+
 class JobRequirements(BaseModel):
     job_title: str
     company: str = ""

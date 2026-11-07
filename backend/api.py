@@ -21,6 +21,7 @@ from backend.database import (
 from backend.tools.application_generator import generate_application_materials
 from backend.tools.countries import COUNTRY_NAMES, location_label
 from backend.tools.job_search import SUPPORTED_COUNTRIES
+from backend.tools.rescore import find_analyzed_job, rescore_job
 from backend.tools.job_sources import SOURCES
 from backend.workflows.job_search_stage10_graph import build_stage10_graph
 
@@ -33,6 +34,11 @@ MAX_CV_SIZE = 10 * 1024 * 1024
 
 class ReviewRequest(BaseModel):
     decision: str = Field(pattern="^(approve|reject)$")
+
+
+class RescoreRequest(BaseModel):
+    job_index: int = Field(ge=0)
+    description: str = Field(min_length=80, max_length=30000)
 
 
 class MaterialsRequest(BaseModel):
@@ -69,6 +75,7 @@ app.add_middleware(
         "http://127.0.0.1:5173",
         "http://localhost:3000",
         "http://127.0.0.1:3000",
+        "https://ai-job-search-agent-omega.vercel.app",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -272,6 +279,58 @@ def review_search(
     )
 
 
+@app.post("/api/runs/{thread_id}/rescore")
+def rescore_job_from_description(
+    thread_id: str,
+    body: RescoreRequest,
+    request: Request,
+):
+    """Re-score one job using a full description pasted by the user."""
+    config = {"configurable": {"thread_id": thread_id}}
+
+    try:
+        state = request.app.state.graph.get_state(config).values
+    except Exception as error:
+        print(f"Could not load search run: {error}")
+        raise HTTPException(
+            status_code=500,
+            detail="Could not load this search run. Check the server terminal.",
+        ) from error
+
+    if not state:
+        raise HTTPException(status_code=404, detail="Search run not found.")
+
+    try:
+        updates = rescore_job(state, body.job_index, body.description)
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except Exception as error:
+        print(f"Re-scoring failed: {error}")
+        raise HTTPException(
+            status_code=500,
+            detail="Could not analyze that description. Check the server terminal.",
+        ) from error
+
+    try:
+        # Keep the stored run in step so materials use the pasted text.
+        request.app.state.graph.update_state(
+            config, updates, as_node="analyze_and_rank"
+        )
+    except Exception as error:
+        print(f"Could not save re-scored run: {error}")
+        raise HTTPException(
+            status_code=500,
+            detail="Could not save the updated score. Check the server terminal.",
+        ) from error
+
+    return jsonable_encoder(
+        {
+            "thread_id": thread_id,
+            "ranked_jobs": updates["ranked_jobs"],
+        }
+    )
+
+
 @app.post("/api/runs/{thread_id}/materials")
 def generate_materials_for_job(
     thread_id: str,
@@ -294,30 +353,11 @@ def generate_materials_for_job(
         raise HTTPException(status_code=404, detail="Search run not found.")
 
     ranked_jobs = state.get("ranked_jobs", [])
-    if body.job_index >= len(ranked_jobs):
-        raise HTTPException(status_code=400, detail="That job is not in this search.")
-
+    try:
+        _, selected = find_analyzed_job(state, body.job_index)
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
     job = ranked_jobs[body.job_index]
-
-    # If two listings share a title and company, pick the matching occurrence.
-    occurrence = sum(
-        1
-        for earlier in ranked_jobs[: body.job_index]
-        if earlier.get("job_title") == job.get("job_title")
-        and earlier.get("company") == job.get("company")
-    )
-    candidates = [
-        item
-        for item in state.get("analyzed_jobs", [])
-        if item["report"].get("job_title") == job.get("job_title")
-        and item["report"].get("company") == job.get("company")
-    ]
-    if not candidates:
-        raise HTTPException(
-            status_code=404,
-            detail="Could not find the original requirements for this job.",
-        )
-    selected = candidates[min(occurrence, len(candidates) - 1)]
 
     try:
         materials = generate_application_materials(

@@ -22,6 +22,16 @@ function formatDate(value) {
   return value ? new Date(value).toLocaleString() : "-";
 }
 
+const FULL_TEXT = ["full_page", "pasted"];
+
+function hasFullText(job) {
+  return FULL_TEXT.includes(job.description_source);
+}
+
+function jobId(job) {
+  return `${job.company}|${job.job_title}|${job.redirect_url || ""}`;
+}
+
 function statusLabel(decision) {
   if (decision === "approved") return "Materials ready";
   if (decision === "rejected") return "Rejected";
@@ -36,6 +46,18 @@ function ScoreBlock({ job }) {
       <div className="score">
         <span className="score-value none">n/a</span>
         <span className="score-note">Too little detail in the listing to score it</span>
+      </div>
+    );
+  }
+
+  if (!hasFullText(job)) {
+    return (
+      <div className="score">
+        <span className="score-value none small">Preview only</span>
+        <span className="score-note">
+          {job.total_matched_required_skills ?? 0} of {job.total_required_skills ?? 0} skills seen
+          in a short preview. Paste the full description for a real score.
+        </span>
       </div>
     );
   }
@@ -74,17 +96,31 @@ function SkillRow({ label, skills, kind }) {
 
 function levelOf(job) {
   const score = job.skill_match_score;
-  if (score == null || job.score_status === "insufficient_data") return "none";
+  if (score == null || job.score_status === "insufficient_data" || !hasFullText(job)) return "none";
   if (job.score_status === "low_confidence") return "tentative";
   return score >= 75 ? "high" : score >= 45 ? "mid" : "low";
 }
 
-function JobCard({ job, index, hasDraft, busy, anyBusy, onGenerate, onView }) {
+function JobCard({ job, hasDraft, busy, anyBusy, onGenerate, onView, onRescore }) {
+  const [pasting, setPasting] = useState(false);
+  const [pastedText, setPastedText] = useState("");
+  const tooShort = pastedText.trim().length < 80;
+
+  async function submitPaste() {
+    const done = await onRescore(job, pastedText);
+    if (done) {
+      setPasting(false);
+      setPastedText("");
+    }
+  }
+
   const meta = [
     job.location,
     job.experience_level && job.experience_level !== "Not specified" && job.experience_level,
     job.source_label && `via ${job.source_label}`,
-    job.description_source === "full_page" ? "full listing read" : "short preview only",
+    job.description_source === "full_page" && "full listing read",
+    job.description_source === "pasted" && "your pasted description",
+    !hasFullText(job) && "short preview only",
   ].filter(Boolean);
 
   const initial = (job.company || "?").trim().charAt(0).toUpperCase();
@@ -108,12 +144,39 @@ function JobCard({ job, index, hasDraft, busy, anyBusy, onGenerate, onView }) {
       {job.warning && <p className="job-warning">{job.warning}</p>}
       {job.interpretation && <p className="job-note">{job.interpretation}</p>}
 
+      {pasting && (
+        <div className="paste">
+          <label htmlFor={`paste-${jobId(job)}`}>
+            Paste the full job description from the listing
+          </label>
+          <textarea
+            id={`paste-${jobId(job)}`}
+            rows={8}
+            value={pastedText}
+            onChange={(e) => setPastedText(e.target.value)}
+            placeholder="Copy the whole description from the listing page and paste it here."
+          />
+          <div className="paste-actions">
+            <button className="btn primary small" disabled={anyBusy || tooShort} onClick={submitPaste}>
+              {busy ? "Re-scoring..." : "Re-score this job"}
+            </button>
+            <button className="btn small" disabled={busy} onClick={() => setPasting(false)}>Cancel</button>
+            {tooShort && <span className="hint">Paste at least a few sentences.</span>}
+          </div>
+        </div>
+      )}
+
       <div className="job-actions">
         {hasDraft ? (
-          <button className="btn" onClick={() => onView(index)}>View materials</button>
+          <button className="btn" onClick={() => onView(job)}>View materials</button>
         ) : (
-          <button className="btn primary" disabled={anyBusy} onClick={() => onGenerate(index)}>
-            {busy ? "Writing your drafts..." : "Generate application materials"}
+          <button className="btn primary" disabled={anyBusy} onClick={() => onGenerate(job)}>
+            {busy && !pasting ? "Writing your drafts..." : "Generate application materials"}
+          </button>
+        )}
+        {!hasFullText(job) && !pasting && (
+          <button className="btn" disabled={anyBusy} onClick={() => setPasting(true)}>
+            Paste full description
           </button>
         )}
         {job.redirect_url && (
@@ -160,7 +223,7 @@ export default function App() {
   const [excluded, setExcluded] = useState("senior,lead,principal");
 
   const [loading, setLoading] = useState(false);
-  const [busyIndex, setBusyIndex] = useState(null);
+  const [busyId, setBusyId] = useState(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [run, setRun] = useState(null);
@@ -248,12 +311,13 @@ export default function App() {
     }
   }
 
-  async function generateMaterials(index) {
-    if (!run?.thread_id) return;
+  async function generateMaterials(job) {
+    const index = (run?.ranked_jobs || []).findIndex((item) => jobId(item) === jobId(job));
+    if (!run?.thread_id || index < 0) return;
 
     setError("");
     setNotice("");
-    setBusyIndex(index);
+    setBusyId(jobId(job));
 
     try {
       const data = await requestJson(
@@ -264,22 +328,52 @@ export default function App() {
           body: JSON.stringify({ job_index: index }),
         }
       );
+      const id = jobId(data.job);
       setDrafts((previous) => ({
         ...previous,
-        [index]: { job: data.job, materials: data.application_materials },
+        [id]: { job: data.job, materials: data.application_materials },
       }));
-      setActiveDraft(index);
+      setActiveDraft(id);
       setTab("materials");
       await loadHistory();
     } catch (err) {
       setError(friendly(err));
     } finally {
-      setBusyIndex(null);
+      setBusyId(null);
     }
   }
 
-  function viewMaterials(index) {
-    setActiveDraft(index);
+  async function rescoreJob(job, description) {
+    const index = (run?.ranked_jobs || []).findIndex((item) => jobId(item) === jobId(job));
+    if (!run?.thread_id || index < 0) return false;
+
+    setError("");
+    setNotice("");
+    setBusyId(jobId(job));
+
+    try {
+      const data = await requestJson(
+        `${API}/api/runs/${encodeURIComponent(run.thread_id)}/rescore`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ job_index: index, description }),
+        }
+      );
+      // The list is re-ranked, so replace it as a whole.
+      setRun((previous) => ({ ...previous, ranked_jobs: data.ranked_jobs }));
+      setNotice("Score updated from your description.");
+      return true;
+    } catch (err) {
+      setError(friendly(err));
+      return false;
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  function viewMaterials(job) {
+    setActiveDraft(jobId(job));
     setTab("materials");
   }
 
@@ -295,7 +389,7 @@ export default function App() {
   }
 
   const jobs = run?.ranked_jobs || [];
-  const draftIndexes = Object.keys(drafts).map(Number);
+  const draftIds = Object.keys(drafts);
   const current = activeDraft != null ? drafts[activeDraft] : null;
   const materials = current?.materials;
   const currency = currencyFor(country);
@@ -310,7 +404,7 @@ export default function App() {
               Search
             </button>
             <button className={tab === "materials" ? "on" : ""} onClick={() => setTab("materials")}>
-              Materials{draftIndexes.length ? ` (${draftIndexes.length})` : ""}
+              Materials{draftIds.length ? ` (${draftIds.length})` : ""}
             </button>
             <button
               className={tab === "history" ? "on" : ""}
@@ -455,14 +549,14 @@ export default function App() {
                 {jobs.length ? (
                   jobs.map((job, index) => (
                     <JobCard
-                      key={`${index}-${job.company}-${job.job_title}`}
+                      key={`${jobId(job)}-${index}`}
                       job={job}
-                      index={index}
-                      hasDraft={index in drafts}
-                      busy={busyIndex === index}
-                      anyBusy={busyIndex !== null}
+                      hasDraft={jobId(job) in drafts}
+                      busy={busyId === jobId(job)}
+                      anyBusy={busyId !== null}
                       onGenerate={generateMaterials}
                       onView={viewMaterials}
+                      onRescore={rescoreJob}
                     />
                   ))
                 ) : (
@@ -477,16 +571,16 @@ export default function App() {
           <section className="panel">
             <h2>Application materials</h2>
 
-            {draftIndexes.length > 0 && (
+            {draftIds.length > 0 && (
               <div className="draft-picker">
-                {draftIndexes.map((i) => (
+                {draftIds.map((id) => (
                   <button
-                    key={i}
-                    className={`btn small ${i === activeDraft ? "primary" : ""}`}
-                    onClick={() => setActiveDraft(i)}
+                    key={id}
+                    className={`btn small ${id === activeDraft ? "primary" : ""}`}
+                    onClick={() => setActiveDraft(id)}
                   >
-                    {drafts[i].job?.job_title || "Job"}
-                    {drafts[i].job?.company ? `, ${drafts[i].job.company}` : ""}
+                    {drafts[id].job?.job_title || "Job"}
+                    {drafts[id].job?.company ? `, ${drafts[id].job.company}` : ""}
                   </button>
                 ))}
               </div>
